@@ -182,11 +182,42 @@ class GradCAMpp(GradCAM):
         return saliency_map, logit
 
 class SmoothGradCAMpp(GradCAM):
+    """Calculate Smooth-GradCAM++ saliency map.
 
+    A simple example:
+
+        # initialize a model, model_dict and gradcampp
+        resnet = torchvision.models.resnet101(pretrained=True)
+        resnet.eval()
+        model_dict = dict(model_type='resnet', arch=resnet, layer_name='layer4', input_size=(224, 224))
+        smgradcampp = SmoothGradCAMpp(model_dict)
+
+        # get an image and normalize with mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)
+        img = load_img()
+        normed_img = normalizer(img)
+
+        # get a GradCAM saliency map on the class index 10.
+        mask, logit = smgradcampp(normed_img, class_idx=10)
+
+        # make heatmap from mask and synthesize saliency map using heatmap and img
+        heatmap, cam_result = visualize_cam(mask, img)
+
+
+    Args:
+        model_dict (dict): a dictionary that contains 'model_type', 'arch', layer_name', 'input_size'(optional) as keys.
+        verbose (bool): whether to print output size of the saliency map givien 'layer_name' and 'input_size' in model_dict.
+    """
     def __init__(self, model_dict, verbose=False):
         super(SmoothGradCAMpp, self).__init__(model_dict, verbose)
     
     def addNoise(self, image, noiselevel):
+        """
+        Args:
+            image: input image with shape of (1, 3, H, W)
+            noiselevel: noise percentage divided by 100
+        Return:
+            img: image with added gaussian noise
+        """
         bitrange = image.max() - image.min()
         noise = np.random.normal(scale = (noiselevel*bitrange), size = (3, 224, 224))
         img = image.add(torch.tensor(noise.astype('float32')))
@@ -194,6 +225,15 @@ class SmoothGradCAMpp(GradCAM):
         return img
 
     def forward(self, input, class_idx=None, retain_graph=False, n=50, noiselevel=0.1):
+        """
+        Args:
+            input: input image with shape of (1, 3, H, W)
+            class_idx (int): class index for calculating GradCAM.
+                    If not specified, the class index that makes the highest model prediction score will be used.
+        Return:
+            mask: saliency map of the same spatial dimension with input
+            logit: model output
+        """
 
         b, c, h, w = input.size()
         #Create lists to store calculated gradients
