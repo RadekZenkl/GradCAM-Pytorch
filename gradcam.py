@@ -1,11 +1,12 @@
 import torch
 import torch.nn.functional as F
+import numpy as np
 
 from utils import find_alexnet_layer, find_vgg_layer, find_resnet_layer, find_densenet_layer, find_squeezenet_layer
 
 
 class GradCAM(object):
-    """Calculate GradCAM salinecy map.
+    """Calculate GradCAM saliency map.
 
     A simple example:
 
@@ -111,7 +112,7 @@ class GradCAM(object):
 
 
 class GradCAMpp(GradCAM):
-    """Calculate GradCAM++ salinecy map.
+    """Calculate GradCAM++ saliency map.
 
     A simple example:
 
@@ -179,3 +180,63 @@ class GradCAMpp(GradCAM):
         saliency_map = (saliency_map-saliency_map_min).div(saliency_map_max-saliency_map_min).data
 
         return saliency_map, logit
+
+class SmoothGradCAMpp(GradCAM):
+
+    def __init__(self, model_dict, verbose=False):
+        super(SmoothGradCAMpp, self).__init__(model_dict, verbose)
+    
+    def addNoise(self, image, noiselevel):
+        bitrange = image.max() - image.min()
+        noise = np.random.normal(scale = (noiselevel*bitrange), size = (3, 224, 224))
+        img = image.add(torch.tensor(noise.astype('float32')))
+        
+        return img
+
+    def forward(self, input, class_idx=None, retain_graph=False, n=50, noiselevel=0.1):
+
+        b, c, h, w = input.size()
+        #Create lists to store calculated gradients
+        alpha1 = []
+        alpha2 = []
+        alpha3 = []
+        relu_input = []
+        
+        if class_idx is None:
+            class_idx = (self.model_arch(input)).max(1)[-1]
+
+        for i in range(0, n):
+            input_ = self.addNoise(input, noiselevel)
+            logit = self.model_arch(input_)
+            score = logit[:, class_idx].squeeze()
+
+            self.model_arch.zero_grad()
+            score.backward(retain_graph=retain_graph)
+            gradients = self.gradients['value'] # dS/dA
+            activations = self.activations['value'] # A
+            b, k, u, v = gradients.size()
+            
+            alpha1.append(gradients.pow(2))
+            alpha2.append(gradients.pow(2))
+            alpha3.append(gradients.pow(3))
+            relu_input.append((score.exp()).mul(gradients))
+        
+        relu_input = (sum(relu_input)).div(n)
+
+        alpha_num = (sum(alpha1)).div(n)
+        alpha_denom = (sum(alpha2)).div(n).mul(2) + \
+                activations.mul((sum(alpha3)).div(n)).view(b, k, u*v).sum(-1, keepdim=True).view(b, k, 1, 1)
+        alpha_denom = torch.where(alpha_denom != 0.0, alpha_denom, torch.ones_like(alpha_denom))
+
+        alpha = alpha_num.div(alpha_denom+1e-7)
+        positive_gradients = F.relu(relu_input) # ReLU(dY/dA) == ReLU(exp(S)*dS/dA))
+        weights = (alpha*positive_gradients).view(b, k, u*v).sum(-1).view(b, k, 1, 1)
+
+        saliency_map = (weights*activations).sum(1, keepdim=True)
+        saliency_map = F.relu(saliency_map)
+        saliency_map = F.upsample(saliency_map, size=(224, 224), mode='bilinear', align_corners=False)
+        saliency_map_min, saliency_map_max = saliency_map.min(), saliency_map.max()
+        saliency_map = (saliency_map-saliency_map_min).div(saliency_map_max-saliency_map_min).data
+    
+        return saliency_map, logit
+
